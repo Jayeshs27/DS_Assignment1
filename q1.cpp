@@ -40,8 +40,10 @@ int main(int argc, char* argv[]){
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
-    int V, E;
-    vector<vector<int>> graph;
+    int V, E, K, R, L;
+    vector<vector<int>> graph; 
+    vector<int> explorers;
+    vector<int> blocked;
     if(rank == 0){
         cin >> V >> E;
         graph.resize(V);
@@ -52,8 +54,21 @@ int main(int argc, char* argv[]){
             if(d == 1) 
                 graph[u].push_back(v);
         }
+        cin >> K;
+        explorers.resize(K);
+        for(int i = 0 ; i < K ; i++){
+            cin >> explorers[i];
+        }
+        cin >> R;
+        cin >> L;
+        blocked.resize(L);
+        for(int i = 0 ; i < L ; i++){
+            cin >> blocked[i];
+        }
     }
     MPI_Bcast(&V, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&R, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
     int nodes_cnt = num_nodes_assigned(size, rank, V);
     vector<vector<int>> neighbours;
     vector<int> dist(nodes_cnt, INF);
@@ -62,10 +77,6 @@ int main(int argc, char* argv[]){
         int node_v = 0;
         for(int i = 0 ; i < nodes_cnt ; i++){
             neighbours[i].insert(neighbours[i].end(), graph[node_v].begin(), graph[node_v].end());
-            // for(auto x : neighbours[i]){
-            //     cout << x << " ";
-            // }
-            // cout << endl;
             node_v += size;
         }
         sendEdges(rank, size, V, graph);
@@ -75,41 +86,23 @@ int main(int argc, char* argv[]){
         receiveEdges(rank, size, neighbours);
     }
     queue<int> que;
-    if(rank == 0){
-        que.push(0);
-        dist[0] = 0;
+    if(rank == R % size){
+        que.push(R);
+        dist[(R - rank) / size] = 0;
     }
     while(true){
         vector<vector<int>> next_layer(size);
         map<int,bool> inQue;
-        // if(rank == 0){
-        //     cout << rank << " : ";
-        //     while(!que.empty()){
-        //         int u = que.front();
-        //         que.pop();
-        //         cout << u << "-";
-        //         int u_ind = (u - rank) / size;
-        //         for(int i = 0 ; i < neighbours[u_ind].size() ; i++){
-        //             int v = neighbours[u_ind][i];
-        //             cout << v << " ";
-        //             if(!inQue[v]){
-        //                 next_layer[v % size].push_back(v);
-        //                 next_layer[v % size].push_back(dist[u_ind] + 1);
-        //                 inQue[v] = true;
-        //             }
-        //         }
-        //     }
-        // }
-        // else{
-        cout << rank << " : ";
+
+        // cout << rank << " : ";
         while(!que.empty()){
             int u = que.front();
             que.pop();
-            cout << u << "-";
+            // cout << u << "-";
             int u_ind = (u - rank) / size;
             for(int i = 0 ; i < neighbours[u_ind].size() ; i++){
                 int v = neighbours[u_ind][i];
-                cout << v << " ";
+                // cout << v << " ";
                 if(!inQue[v]){
                     next_layer[v % size].push_back(v);
                     next_layer[v % size].push_back(dist[u_ind] + 1);
@@ -117,15 +110,6 @@ int main(int argc, char* argv[]){
                 }
             }
         }
-        // }
-        cout << endl;
-        // print loop
-        // for(int i = 0 ; i < size ; i++){
-        //     for(auto x : next_layer[i]){
-        //         cout << x << " ";
-        //     }
-        //     cout << endl;
-        // }
 
         vector<int> sendBuf, sendCnts(size), sendDispls(size);
         int displs = 0;
@@ -146,32 +130,15 @@ int main(int argc, char* argv[]){
         MPI_Alltoallv(sendBuf.data(), sendCnts.data(), sendDispls.data(), MPI_INT, recvBuf.data(), \
          recvCnts.data(), recvDispls.data(), MPI_INT, MPI_COMM_WORLD);
 
-        // working till here
-        // cout << rank << " : " << endl;
         int isEmpty = 1;
         for(int i = 0 ; i < recvBuf.size() ; i += 2){
             int v_ind = (recvBuf[i] - rank) / size;
             if(dist[v_ind] == INF){
                 dist[v_ind] = recvBuf[i + 1];
                 que.push(recvBuf[i]);
-                // cout << recvBuf[i] << " " << recvBuf[i + 1] << " | ";
                 isEmpty = 0;
             }
         }
-        // cout << endl;
-        // cout << rank << endl;
-        // for(int i = 0 ; i < size ; i++){
-        //     cout << sendCnts[i] << " ";
-        // }
-        // cout << endl;
-        // for(int i = 0 ; i < size ; i++){
-        //     cout << recvCnts[i] << " ";
-        // }
-        // cout << endl;
-        // for(auto t : recvBuf){
-        //     cout << t << " ";
-        // }
-        // cout << endl;
 
         int isAllEmpty;
         MPI_Allreduce(&isEmpty, &isAllEmpty, 1, MPI_INT, MPI_BAND, MPI_COMM_WORLD);
@@ -179,22 +146,25 @@ int main(int argc, char* argv[]){
             break;
         }
 
-        // break;
     }
+    vector<int> recvCnts(size), recvDispls(size);
+    MPI_Gather(&nodes_cnt, 1, MPI_INT, recvCnts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
+    int sum = 0;
+    for(int i = 0 ; i < size ; i++){
+        recvDispls[i] = sum;
+        sum += recvCnts[i];
+    }
+    vector<int> recvDistances(sum);
+    MPI_Gatherv(dist.data(), nodes_cnt, MPI_INT, recvDistances.data(), recvCnts.data(), recvDispls.data(), MPI_INT, 0, MPI_COMM_WORLD);
 
-
-    // PRINT /////////
-    // cout << "Rank-" << rank  << " " << nodes_cnt << endl;
-    // int node_v = rank;
-    // for(int i = 0 ; i < nodes_cnt ; i++){
-    //     cout << node_v << " : ";
-    //     for(auto node : neighbours[i]){
-    //         cout << node << " ";
-    //     }
-    //     cout << endl;
-    //     node_v += size;
-    // }
-
+    if(rank == 0){
+        for(int i = 0 ; i < K ; i++){
+            int pproc = explorers[i] % size;
+            int v_ind = recvDispls[pproc] + (explorers[i] - pproc) / size;
+            cout << recvDistances[v_ind] << " ";
+        }
+        cout << endl;
+    }
     MPI_Finalize();
     return 0;
 }
