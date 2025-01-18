@@ -9,6 +9,9 @@ bool compare1(pair<vector<int>,char> a, pair<vector<int>,char> b){
 bool compare2(pair<vector<int>,char> a, pair<vector<int>,char> b){
      return a.first[2] < b.first[2];
 }
+bool compare3(vector<int> a, vector<int> b){
+     return a[0] < b[0];
+}
 
 vector<int> calculatePartitions(int rank, int size, int N, int M){
     vector<int> location(2);
@@ -140,14 +143,14 @@ int main(int argc, char* argv[]){
         init_pos.resize(size);
         sort(balls.begin(), balls.end(), comparator);
         int ptr = 0;
-        for(int i = 0 ; i < K ; i++){
-            cout << balls[i].first[1] << " " << balls[i].first[2] << endl;
-        }
+        // for(int i = 0 ; i < K ; i++){
+        //     cout << balls[i].first[1] << " " << balls[i].first[2] << endl;
+        // }
         for(int i = 0 ; i < size ; i++){
             auto dims = calculatePartitions(i, size, N, M);
-            cout << dims[0] << " " << dims[1] << endl;
+            // cout << dims[0] << " " << dims[1] << endl;
             while(dims[0] <= dims[1] && ptr < K && balls[ptr].first[sort_dim] <= dims[1]){
-                cout << balls[ptr].first[0] << endl;
+                // cout << balls[ptr].first[0] << endl;
                 init_pos[i].push_back(balls[ptr].first[0]);
                 init_pos[i].push_back(balls[ptr].first[1]);
                 init_pos[i].push_back(balls[ptr].first[2]);
@@ -345,8 +348,30 @@ int main(int argc, char* argv[]){
         //////////
         T--;
     }
-    for(int i = 0 ; i < balls_info.size() ; i+=4){
-        cout << balls_info[i] << " " << balls_info[i + 1] << " " << balls_info[i + 2] << " " << DECODE_DIR[balls_info[i + 3]] << endl;
+    // for(int i = 0 ; i < balls_info.size() ; i+=4){
+    //     cout << balls_info[i] << " " << balls_info[i + 1] << " " << balls_info[i + 2] << " " << DECODE_DIR[balls_info[i + 3]] << endl;
+    // }
+    int balls_cnt = balls_info.size();
+    vector<int> recvCnts(size), recvDispls(size);
+    MPI_Gather(&balls_cnt, 1, MPI_INT, recvCnts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
+    int totalsz = 0;
+    for(int i = 0 ; i < size ; i++){
+        recvDispls[i] = totalsz;
+        totalsz += recvCnts[i];
+    }
+    vector<int> recvInfo(totalsz);
+    MPI_Gatherv(balls_info.data(), balls_cnt, MPI_INT, recvInfo.data(), recvCnts.data(), recvDispls.data(), MPI_INT, 0, MPI_COMM_WORLD);
+    if(rank == 0){
+        vector<vector<int>> final_pos(K, vector<int>(4));
+        for(int i = 0 ; i < K ; i++){
+           for(int j = 0 ; j < 4 ; j++){
+                final_pos[i][j] = recvInfo[i*4 + j];
+           }
+        }
+        sort(final_pos.begin(), final_pos.end(), compare3);
+        for(int i = 0 ; i < K ; i++){
+            cout << final_pos[i][1] << " " << final_pos[i][2] << " " << DECODE_DIR[final_pos[i][3]] << endl;
+        }
     }
     MPI_Finalize();
     return 0;
