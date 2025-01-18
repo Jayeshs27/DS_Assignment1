@@ -3,29 +3,6 @@
 #include<mpi.h>
 using namespace std;
 
-bool compare1(pair<vector<int>,char> a, pair<vector<int>,char> b){
-     return a.first[1] < b.first[1];
-}
-bool compare2(pair<vector<int>,char> a, pair<vector<int>,char> b){
-     return a.first[2] < b.first[2];
-}
-bool compare3(vector<int> a, vector<int> b){
-     return a[0] < b[0];
-}
-
-vector<int> calculatePartitions(int rank, int size, int N, int M){
-    vector<int> location(2);
-    int len = N;
-    if(M > N) len = M;
-    int sz = len / size;
-    if(rank == size - 1){
-        sz += len % size;
-    }
-    location[0] = rank * (len / size);
-    location[1] = location[0] + sz - 1;
-    return location;
-}
-
 map<char, int> ENCODE_DIR = {
     {'R', 1},
     {'L', 2},
@@ -51,6 +28,31 @@ map<char, char> CLOCKWISE = {
     {'U', 'R'},
     {'D', 'L'}
 };
+
+bool compare1(pair<vector<int>,char> a, pair<vector<int>,char> b){
+     return a.first[1] < b.first[1];
+}
+
+bool compare2(pair<vector<int>,char> a, pair<vector<int>,char> b){
+     return a.first[2] < b.first[2];
+}
+
+bool compare3(vector<int> a, vector<int> b){
+     return a[0] < b[0];
+}
+
+vector<int> calculatePartitions(int rank, int size, int N, int M){
+    vector<int> location(2);
+    int len = N;
+    if(M > N) len = M;
+    int sz = len / size;
+    if(rank == size - 1){
+        sz += len % size;
+    }
+    location[0] = rank * (len / size);
+    location[1] = location[0] + sz - 1;
+    return location;
+}
 
 void updatePosition(vector<int> &balls_info, int i, int N, int M){
     int direct = balls_info[i + 3];
@@ -81,17 +83,9 @@ bool goingLeftORUp(vector<int> &balls_info, int i){
 void updateGrid(vector<vector<int>> &grid, vector<int> &balls_info, int i, int xoffset, int yoffset){
     int x = balls_info[i + 1] - xoffset;
     int y = balls_info[i + 2] - yoffset;
-    // cout << "grid" << x << " " << y << endl;
-    // cout << balls_info[i] << " " << balls_info[i + 1] << " " << balls_info[i + 2] << endl;
-    // cout << x_st_end[0] << " " << x_st_end[1] << " " << x << endl;
-    // cout << y_st_end[0] << " " << y_st_end[1] << " " << y << endl;
-    // cout << endl;
     grid[x][y]++;
 }
 
-void printInfo(vector<int> &arr, int i){
-    cout << arr[i] << " " << arr[i + 1] << " " << arr[i + 2] << " " << arr[i + 3] << endl;
-} 
 void updateDirection(vector<vector<int>> &grid, vector<int> &arr, int i, int xoffset, int yoffset){
     int x = arr[i + 1] - xoffset;
     int y = arr[i + 2] - yoffset;
@@ -103,6 +97,7 @@ void updateDirection(vector<vector<int>> &grid, vector<int> &arr, int i, int xof
         arr[i + 3] = ENCODE_DIR[REVERSE[DECODE_DIR[arr[i + 3]]]];
     }
 }
+
 void sendInitialPositions(int size, vector<vector<int>> &init_pos){
     for(int proc = 1 ; proc < size ; proc++){
         int tag = proc;
@@ -111,6 +106,7 @@ void sendInitialPositions(int size, vector<vector<int>> &init_pos){
         MPI_Send(init_pos[proc].data(), mesg_sz, MPI_INT, proc, 2*tag, MPI_COMM_WORLD);
     }
 }
+
 void receiveInitialPositions(int rank, int size, vector<int> &balls_pos){
     MPI_Status status;
     int mesg_sz;
@@ -143,14 +139,9 @@ int main(int argc, char* argv[]){
         init_pos.resize(size);
         sort(balls.begin(), balls.end(), comparator);
         int ptr = 0;
-        // for(int i = 0 ; i < K ; i++){
-        //     cout << balls[i].first[1] << " " << balls[i].first[2] << endl;
-        // }
         for(int i = 0 ; i < size ; i++){
             auto dims = calculatePartitions(i, size, N, M);
-            // cout << dims[0] << " " << dims[1] << endl;
             while(dims[0] <= dims[1] && ptr < K && balls[ptr].first[sort_dim] <= dims[1]){
-                // cout << balls[ptr].first[0] << endl;
                 init_pos[i].push_back(balls[ptr].first[0]);
                 init_pos[i].push_back(balls[ptr].first[1]);
                 init_pos[i].push_back(balls[ptr].first[2]);
@@ -164,29 +155,14 @@ int main(int argc, char* argv[]){
     MPI_Bcast(&T, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
     vector<int> balls_info;
-
+    vector<int> x_st_end(2), y_st_end(2);
     if(rank == 0){
         sendInitialPositions(size, init_pos);
         balls_info.insert(balls_info.end(), init_pos[0].begin(), init_pos[0].end());
-        // cout << rank << endl;
-        // for(auto ele : balls_info){
-        //     cout << ele << " ";
-        // }
-        // cout << endl;
-        // cout << init_pos[0].size() << endl;
-        // cout << balls_info.size() << endl;
     }
     else{
         receiveInitialPositions(rank, size, balls_info);
-        // cout << rank << endl;
-        // for(auto ele : balls_info){
-        //     cout << ele << " ";
-        // }
-        // cout << endl;
-        // cout << balls_info.size() << endl;
     }
-
-    vector<int> x_st_end(2), y_st_end(2);
     if(N >= M){
         y_st_end[0] = 0;
         y_st_end[1] = M - 1;
@@ -202,24 +178,9 @@ int main(int argc, char* argv[]){
     while(T > 0){
         vector<vector<int>> local_grid(xlen, vector<int>(ylen, 0));
         int len = balls_info.size();
-
-        // cout << rank << endl;
-        // cout << x_st_end[0] << " " << x_st_end[1] << endl;
-        // cout << y_st_end[0] << " " << y_st_end[1] << endl;
-        // for(auto ele : balls_info){
-        //     cout << ele << " ";
-        // }
-        // cout << endl;
-
-        // if(rank == 1){
         vector<bool> toKeep(len/4, false);
         vector<int> send_to_previous, send_to_next;
-        // for(auto ele : balls_info){
-        //     cout << ele << " ";
-        // }
-        // cout << endl;
         for(int i = 0 ; i < len ; i += 4){
-            // int x = arr[i + 1], y = arr[i + 2], direct = arr[i + 3];
             updatePosition(balls_info, i, N, M);
             if(exceedingBoundary(balls_info, i, x_st_end, y_st_end)){
                 if(goingLeftORUp(balls_info, i)){
@@ -245,10 +206,6 @@ int main(int argc, char* argv[]){
         int next_proc = (rank + 1 + size) % size;
         int recvCnt;
         MPI_Status status;
-
-        // int sendCnt = send_to_next.size();
-        // int tag = rank + next_proc;
-        
         if(rank % 2 == 1){
             int sendCnt = send_to_next.size();
             int tag = rank + next_proc;
@@ -288,19 +245,18 @@ int main(int argc, char* argv[]){
             MPI_Sendrecv(send_to_next.data(), sendCnt, MPI_INT, next_proc, 2 * tag, \
                 from_next.data(), recvCnt, MPI_INT, next_proc, 2 * tag, MPI_COMM_WORLD, &status);
         }
-        // cout << rank << endl;
-        // if(rank == 0){
         for(int i = 0 ; i < from_prev.size() ; i += 4){
-            // printInfo(from_prev, i);
             updateGrid(local_grid, from_prev, i, x_st_end[0], y_st_end[0]);
         }
-        // cout << endl;
-        // cout << rank << endl;
         for(int i = 0 ; i < from_next.size() ; i += 4){
-            // printInfo(from_next, i);
             updateGrid(local_grid, from_next, i, x_st_end[0], y_st_end[0]);
         }
-        // }
+        for(int i = 0 ; i < from_prev.size() ; i += 4){
+            updateDirection(local_grid, from_prev, i, x_st_end[0], y_st_end[0]);
+        }
+        for(int i = 0 ; i < from_next.size() ; i += 4){
+            updateDirection(local_grid, from_next, i, x_st_end[0], y_st_end[0]);
+        }
         vector<int> temp;
         temp.insert(temp.end(), balls_info.begin(), balls_info.end());
         balls_info.clear();
@@ -313,44 +269,10 @@ int main(int argc, char* argv[]){
                 balls_info.push_back(temp[i + 3]);
             }
         }
-        for(int i = 0 ; i < from_prev.size() ; i += 4){
-            updateDirection(local_grid, from_prev, i, x_st_end[0], y_st_end[0]);
-        }
-        for(int i = 0 ; i < from_next.size() ; i += 4){
-            updateDirection(local_grid, from_next, i, x_st_end[0], y_st_end[0]);
-        }
         balls_info.insert(balls_info.end(), from_prev.begin(), from_prev.end());
         balls_info.insert(balls_info.end(), from_next.begin(), from_next.end());
-
-
-        /////////
-        // cout << "Rank : " << rank << endl;
-        // cout << T << endl;
-        // for(int i = 0 ; i < balls_info.size() ; i+=4){
-        //     cout << balls_info[i] << " " << balls_info[i + 1] << " " << balls_info[i + 2] << " " << DECODE_DIR[balls_info[i + 3]] << endl;
-        // }
-        // for(int i = 0 ; i < xlen ; i++){
-        //     for(int j = 0 ; j < ylen ; j++){
-        //         cout << local_grid[i][j] << " ";
-        //     }
-        //     cout << endl;
-        // }
-        // cout << endl;
-        
-        // for(auto ele : from_prev){
-        //     cout << ele << " ";
-        // }
-        // cout << endl;
-        // for(auto ele : from_next){
-        //     cout << ele << " ";
-        // }
-        // cout << endl;
-        //////////
         T--;
     }
-    // for(int i = 0 ; i < balls_info.size() ; i+=4){
-    //     cout << balls_info[i] << " " << balls_info[i + 1] << " " << balls_info[i + 2] << " " << DECODE_DIR[balls_info[i + 3]] << endl;
-    // }
     int balls_cnt = balls_info.size();
     vector<int> recvCnts(size), recvDispls(size);
     MPI_Gather(&balls_cnt, 1, MPI_INT, recvCnts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -376,27 +298,3 @@ int main(int argc, char* argv[]){
     MPI_Finalize();
     return 0;
 }
-/*
-
-3 4 3 2
-0 0 R
-2 3 L
-1 1 U
-
-8 8 10 10
-1 2 D
-5 4 U
-3 0 R
-2 5 L
-3 4 L
-7 0 L
-2 5 U
-4 4 D
-5 2 U
-7 0 R
-*/
-
-
-/*
-mpiexec -np 12 --use-hwthread-cpus --oversubscribe ./a.out
-*/
