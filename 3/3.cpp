@@ -100,15 +100,18 @@ public:
     int server_id;
     atomic<bool> active_flag;
     atomic<bool> exit_flag;
+    int chunk_cnt;
+    vector<vector<char>> stored_data;
     StorageServer(int server_id){
         this->server_id = server_id;
         this->active_flag.store(true);
         this->exit_flag.store(false);
+        this->chunk_cnt = 0;
     }
-    void confirmExit(){
-        int qtype = EXIT;
-        sendQueryType(qtype, MD_SERVER_RANK);
-    }
+    // void confirmExit(){
+    //     int qtype = EXIT;
+    //     sendQueryType(qtype, MD_SERVER_RANK);
+    // }
     bool isActive(){
         return this->active_flag.load();
     }
@@ -124,6 +127,99 @@ public:
     void activateServer(){
         this->active_flag.store(true);
     }
+    void searchExactWord(int chunk_idx, string& target, vector<int> &positions) {
+        string line(this->stored_data[chunk_idx].begin(), this->stored_data[chunk_idx].end());
+        size_t pos = 0;
+        size_t wordStart = 0;
+
+        istringstream iss(line);
+        string word;
+        while (iss >> word) {
+            if (word == target) {
+                positions.push_back(wordStart); 
+            }
+            wordStart = line.find(word, wordStart) + word.length() + 1; // Include the space
+        }
+    }
+    int handleSearchRequest(){
+        vector<char> query;
+        int target_size, chunk_id;
+        MPI_Status status;
+        if(receiveChunkId(chunk_id, this->server_id + 1, MD_SERVER_RANK) == -1){
+            return -1;
+        }
+        if(MPI_Recv(&target_size, 1, MPI_INT, MD_SERVER_RANK, this->server_id + 1, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
+            return -1;
+        }
+        query.resize(target_size);
+        if(MPI_Recv(query.data(), target_size, MPI_CHAR, MD_SERVER_RANK, this->server_id + 1, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
+            return -1;
+        }
+
+        string target(query.begin(), query.end());
+        vector<int> offsets;
+        this->searchExactWord(chunk_id, target, offsets);
+
+        int vsize = offsets.size();
+        if(MPI_Send(&vsize, 1, MPI_INT, MD_SERVER_RANK, MD_SERVER_RANK, MPI_COMM_WORLD) != MPI_SUCCESS){
+            return -1;
+        }
+        if(MPI_Send(offsets.data(), vsize, MPI_INT, MD_SERVER_RANK, MD_SERVER_RANK, MPI_COMM_WORLD) != MPI_SUCCESS){
+            return -1;
+        }
+
+        vector<int> front, back;
+        this->findHalfMatches(chunk_id, target, front, back);
+
+        // cout << "front: ";
+        // for(auto f : front){
+        //     cout << f << " ";
+        // }
+        // cout << endl;
+        // cout << "back: ";
+        // for(auto b : back){
+        //     cout << b << " ";
+        // }
+        // cout << endl;
+
+        vsize = front.size();
+        if(MPI_Send(&vsize, 1, MPI_INT, MD_SERVER_RANK, MD_SERVER_RANK, MPI_COMM_WORLD) != MPI_SUCCESS){
+            return -1;
+        }
+        if(MPI_Send(front.data(), vsize, MPI_INT, MD_SERVER_RANK, MD_SERVER_RANK, MPI_COMM_WORLD) != MPI_SUCCESS){
+            return -1;
+        }
+
+        vsize = back.size();
+        if(MPI_Send(&vsize, 1, MPI_INT, MD_SERVER_RANK, MD_SERVER_RANK, MPI_COMM_WORLD) != MPI_SUCCESS){
+            return -1;
+        }
+        if(MPI_Send(back.data(), vsize, MPI_INT, MD_SERVER_RANK, MD_SERVER_RANK, MPI_COMM_WORLD) != MPI_SUCCESS){
+            return -1;
+        }
+        return 0;
+    }
+    void findHalfMatches(int chunk_id, const string &target, vector<int> &front, vector<int> &back) {
+        const string &line = string(this->stored_data[chunk_id].begin(), this->stored_data[chunk_id].end());
+        int target_len = target.size();
+        int line_len = line.size(); 
+
+        for (int i = 1; i < target_len; ++i) {
+            if (std::equal(target.begin() + i, target.end(), line.begin())) {
+                front.push_back(target_len - i);
+            }
+        }
+
+        for (int i = 1; i < target_len; ++i) {
+            int line_start = line_len - (target_len - i);
+            if (line_start < 0) break; // Prevent negative index
+
+            if (std::equal(target.begin(), target.begin() + target_len - i, line.begin() + line_start)) {
+                back.push_back(target_len - i);
+            }
+        }
+    }
+
 };
 
 class File{
@@ -263,7 +359,8 @@ class MetaDataServer{
             for(int j = 0 ; j < NUM_REPLICATION ; j++){
                 tie(server_id, chunk_id) = file->storage_location[i][j];
                 if(server_id != -1){
-                    if(sendQueryType(0, server_id + 1) == -1){
+                    int qtype = UPLOAD;
+                    if(sendQueryType(qtype, server_id + 1) == -1){
                         return -1;
                     }
                     if(sendChunk(chunks_list[i], server_id + 1) == -1){
@@ -296,7 +393,7 @@ class MetaDataServer{
     }
     int retrieveFile(File* file, string &content){
         // need to modify for failover cases
-        int qtype = 1, server_id, chunk_id, ret;
+        int qtype = RETRIEVE, server_id, chunk_id, ret;
         for(int i = 0 ; i < file->chunks_cnt ; i++){
             vector<char> chunk(32,'\0');
             tie(server_id, chunk_id) = this->getAvailableLocation(file, i);
@@ -310,12 +407,87 @@ class MetaDataServer{
             if(receiveChunk(chunk, MD_SERVER_RANK, server_id + 1) == -1){
                 return -1;
             }
+            printChunk(chunk);
+            cout << endl;
             // cout << "recv chunk-" << i << " from rank-" << server_id + 1 << endl;
-            content.append(chunk.begin(), chunk.end());
+            if(i == file->chunks_cnt - 1){
+                for(auto c : chunk){
+                    if(c == '\0'){
+                        break;
+                    }
+                    content.push_back(c);
+                }
+            }
+            else{
+                content.append(chunk.begin(), chunk.end());
+            }
         }
         return 0;
     }
+    int searchIntoFile(File* file, string target){
+        vector<int> offsets;
+        int qtype = SEARCH, server_id, chunk_id, ret;
+        for(int i = 0 ; i < file->chunks_cnt ; i++){
+            tie(server_id, chunk_id) = this->getAvailableLocation(file, i);
+            assert(server_id != -1);
+            if(sendQueryType(qtype, server_id + 1) == -1){
+                return -1;
+            }
+            if(sendChunkId(chunk_id, server_id + 1) == -1){
+                return -1;
+            }
+            vector<int> positions;
+            if(handleSearchRequest(target, server_id + 1, positions) == -1){
+                return -1;
+            }
+            for(auto p : positions){
+                offsets.push_back(p + i * CHUNK_SIZE);
+            }
+        }
+        cout << offsets.size() << endl;
+        for(auto p : offsets){
+            cout << p << " ";
+        }
+        cout << endl;
+        return 0;
+    }
+    int handleSearchRequest(string target, int DstRank, vector<int> &positions){
+        int target_size = target.size();
+        if(MPI_Send(&target_size, 1, MPI_INT, DstRank, DstRank, MPI_COMM_WORLD) != MPI_SUCCESS){
+            return -1;
+        }
+        if(MPI_Send(target.c_str(), target_size, MPI_CHAR, DstRank, DstRank, MPI_COMM_WORLD) != MPI_SUCCESS){
+            return -1;
+        }
 
+        int data_size;
+        MPI_Status status; 
+        if(MPI_Recv(&data_size, 1, MPI_INT, DstRank, MD_SERVER_RANK, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
+            return -1;
+        }
+        positions.resize(data_size);
+        if(MPI_Recv(positions.data(), data_size, MPI_INT, DstRank, MD_SERVER_RANK, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
+            return -1;
+        }
+
+        vector<int> partial_front, partial_back;
+        if(MPI_Recv(&data_size, 1, MPI_INT, DstRank, MD_SERVER_RANK, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
+            return -1;
+        }
+        partial_front.resize(data_size);
+        if(MPI_Recv(partial_front.data(), data_size, MPI_INT, DstRank, MD_SERVER_RANK, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
+            return -1;
+        }
+
+        if(MPI_Recv(&data_size, 1, MPI_INT, DstRank, MD_SERVER_RANK, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
+            return -1;
+        }
+        partial_back.resize(data_size);
+        if(MPI_Recv(partial_back.data(), data_size, MPI_INT, DstRank, MD_SERVER_RANK, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
+            return -1;
+        }
+        return 0;
+    }
     void* receiveHeartBeat(void*) {
         while (!this->shouldExit()) {
             int server_id;
@@ -524,7 +696,7 @@ int main(int argc, char** argv){
                             printFailure();
                             break;
                         }
-                        // ofstream output("temp.txt");
+                        // ofstream output("out.txt");
                         // if (!output.is_open()) {
                         //     cerr << "Error: Unable to open file for writing." << endl;
                         //     return -1;
@@ -546,7 +718,7 @@ int main(int argc, char** argv){
                         break;
                     }
                     else{
-                        // search
+                        md_server->searchIntoFile(file, args[2]);
                     }
                     break;
                 }
@@ -609,28 +781,29 @@ int main(int argc, char** argv){
         pthread_t heartBeatSender;
         StorageServer* storageServer = new StorageServer(rank - 1);
         pthread_create(&heartBeatSender, nullptr, sendHeartBeat, (void*)storageServer);
-        vector<vector<char>> stored_data;
         // To Do - Error handling on this side(storage server)
-        
-        int chunk_cnt = 0;
+
         while(!storageServer->shouldExit()){
             int qtype = -1;
-            bool exitflag = false;
-            int ret = receiveQueryType(qtype, rank, MD_SERVER_RANK);
+            receiveQueryType(qtype, rank, MD_SERVER_RANK);
             switch(qtype){
                 case UPLOAD:{
-                    vector<char> chunk(32);
+                    vector<char> chunk(32,'\0');
                     receiveChunk(chunk, rank, MD_SERVER_RANK);
                     // cout << "Rank - " << rank << " : chunk receieved" << endl;
-                    stored_data.push_back(chunk);
-                    chunk_cnt++;
+                    storageServer->stored_data.push_back(chunk);
+                    storageServer->chunk_cnt += 1;
                     break;
                 }
                 case RETRIEVE:{
                     int chunkId;
                     receiveChunkId(chunkId, rank, MD_SERVER_RANK);
-                    sendChunk(stored_data[chunkId], MD_SERVER_RANK);
+                    sendChunk(storageServer->stored_data[chunkId], MD_SERVER_RANK);
                     // cout << "chunk-" << chunkId << " sent from rank-" << rank << endl;
+                    break;
+                }
+                case SEARCH:{
+                    storageServer->handleSearchRequest();
                     break;
                 }
                 case EXIT:{
