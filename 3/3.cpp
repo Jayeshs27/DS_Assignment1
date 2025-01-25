@@ -1,10 +1,16 @@
 #include<bits/stdc++.h>
-#include<mpi.h>
+#include <mpi.h>
+#include <pthread.h>
+#include <chrono>
+#include <mutex>
+#include <unistd.h>
+#include <atomic>
 
 using namespace std;
 
 #define CHUNK_SIZE 32
 #define MD_SERVER_RANK 0
+#define FAILOVER_INTERVAL 5
 
 void divideFileIntoChunks(string &data, vector<vector<char>> &chunks_list);
 int sendChunk(vector<char> &data, int DstRank);
@@ -21,7 +27,7 @@ enum QueryType{
     SEARCH,
     LIST_FILE,
     FAILOVER,
-    RECOVERY,
+    RECOVER,
     EXIT,
 };
 
@@ -54,15 +60,50 @@ int receiveChunkId(int &chunk_id, int SelfRank, int srcRank){
     return 0;
 }
 
-class StorageServer{
-    public:
-        int id;
-        int chunks_cnt;
-        bool is_down;
-    StorageServer(int id){
+class StorageServerInfo{
+public:
+    int id;
+    int chunks_cnt;
+    bool isDown;
+    chrono::time_point<chrono::steady_clock> last_heartbeat;
+
+    StorageServerInfo(int id){
         this->id = id; // id is rank - 1
         this->chunks_cnt = 0;
-        this->is_down = false;
+        this->isDown = false;
+        this->last_heartbeat = chrono::steady_clock::now();
+    }
+    ~StorageServerInfo();
+};
+
+class StorageServer{
+public:
+    int server_id;
+    atomic<bool> active_flag;
+    atomic<bool> exit_flag;
+    StorageServer(int server_id){
+        this->server_id = server_id;
+        this->active_flag.store(true);
+        this->exit_flag.store(false);
+    }
+    void confirmExit(){
+        int qtype = EXIT;
+        sendQueryType(qtype, MD_SERVER_RANK);
+    }
+    bool isActive(){
+        return this->active_flag.load();
+    }
+    bool shouldExit(){
+        return this->exit_flag.load();
+    }
+    void setExit(){
+        this->exit_flag.store(true);
+    }
+    void deactivateServer(){
+        this->active_flag.store(false);
+    }
+    void activateServer(){
+        this->active_flag.store(true);
     }
 };
 
@@ -72,6 +113,7 @@ public:
     string path;
     int chunks_cnt;
     vector<pair<int,int>> storage_location;
+
     File(string name, string path){
         this->name = name;
         this->path = path;
@@ -101,17 +143,37 @@ public:
 class MetaDataServer{
     public:
         int num_storage_servers;
-        vector<StorageServer*> storage_servers;
+        vector<StorageServerInfo*> storage_servers;
         vector<File*> files_list;
-    
+        mutex heartBeatMutex;
+        atomic<bool> exit_flag;
+
     MetaDataServer(int num_servers){
+        this->exit_flag.store(false);
         this->num_storage_servers = num_servers;
         this->storage_servers.resize(num_servers);
         for(int i = 0 ; i < num_servers ; i++){
-            this->storage_servers[i] = new StorageServer(i);
+            this->storage_servers[i] = new StorageServerInfo(i);
         }
     }
+    void setExit(){
+        this->exit_flag.store(true);
+    }
+    bool shouldExit(){
+        return this->exit_flag.load();
+    }
+    void closeStorageServers(){
+        for(int i = 0 ; i < num_storage_servers ; i++){
+            int qtype = EXIT;
+            sendQueryType(qtype, i + 1);
+        }
+        // for(int i = 0 ; i < num_storage_servers ; i++){
+        //     int qtype;
+        //     receiveQueryType(qtype, MD_SERVER_RANK, i + 1);
+        // }
+    }
     void allocateStorageServers(File *file){
+        // Need to modify for failover of storage servers
         file->storage_location.resize(file->chunks_cnt);
         int server_id = 0;
         for(int i = 0 ; i < file->chunks_cnt ; i++){
@@ -134,7 +196,8 @@ class MetaDataServer{
             if(sendChunk(chunks_list[i], server_id + 1) == -1){
                 return -1;
             }
-            cout << "sent chunk-" << i << " to rank-" << server_id + 1 << endl;
+            this->storage_servers[server_id]->chunks_cnt += 1;
+            // cout << "sent chunk-" << i << " to rank-" << server_id + 1 << endl;
         }
         files_list.push_back(file);
         return 0;
@@ -167,7 +230,164 @@ class MetaDataServer{
         }
         return 0;
     }
+
+    // void* receiveHeartBeat(void*) {
+    //     while (!this->shouldExit()) {
+    //         int server_id;
+    //         MPI_Recv(&server_id, 1, MPI_INT, MPI_ANY_SOURCE, MD_SERVER_RANK, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    //         // cout << "recevied from " << server_id << endl;
+    //         lock_guard<mutex> lock(this->heartBeatMutex);
+    //         this->storage_servers[server_id]->last_heartbeat = chrono::steady_clock::now();
+    //         if(this->storage_servers[server_id]->isDown){
+    //             cout << "ss-" << server_id + 1 << " is up" << endl;
+    //             this->storage_servers[server_id]->isDown = false;
+    //         }
+    //     }
+    //     cout << "recv" << endl;
+    //     return nullptr;
+    // }
+
+    void* receiveHeartBeat(void*) {
+        while (!this->shouldExit()) {
+            int server_id;
+            MPI_Request request;
+            MPI_Irecv(&server_id, 1, MPI_INT, MPI_ANY_SOURCE, 72, MPI_COMM_WORLD, &request);
+
+            // Check for completion of the receive operation
+            int flag = 0;
+            while (!this->shouldExit()) {
+                MPI_Test(&request, &flag, MPI_STATUS_IGNORE);
+                if (flag) {
+                    // Message received
+                    lock_guard<mutex> lock(this->heartBeatMutex);
+                    this->storage_servers[server_id]->last_heartbeat = chrono::steady_clock::now();
+                    if (this->storage_servers[server_id]->isDown) {
+                        cout << "ss-" << server_id + 1 << " is up" << endl;
+                        this->storage_servers[server_id]->isDown = false;
+                    }
+                    break; // Exit inner loop after processing the message
+                }
+                // Optionally sleep briefly to avoid busy-waiting
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+
+            if (this->shouldExit()) {
+                MPI_Cancel(&request); // Cancel pending non-blocking operation
+                MPI_Request_free(&request);
+            }
+        }
+
+        cout << "recv" << endl;
+        return nullptr;
+    }
+
+    void* monitorHeartBeat(void*) {
+        while (!this->shouldExit()) {
+            for (int i = 0; i < 100 ; ++i) {
+                if (this->shouldExit()) {
+                    cout << "monitor" << endl;
+                    return nullptr;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            lock_guard<mutex> lock(this->heartBeatMutex);
+            for (int i = 0 ; i < this->num_storage_servers ; i++) {
+                int time_passed = chrono::duration_cast<chrono::seconds>(chrono::steady_clock::now() - this->storage_servers[i]->last_heartbeat).count();
+                if (!this->storage_servers[i]->isDown && time_passed > FAILOVER_INTERVAL) {
+                    cout << "rank " << i + 1 << " is down." << endl;
+                    this->storage_servers[i]->isDown = true;
+                }
+            }
+        }
+        cout << "monitor" << endl;
+        return nullptr;
+    }
+
+    static void* startReceiver(void* instance) {
+        return ((MetaDataServer*)instance)->receiveHeartBeat(nullptr);
+    }
+    static void* startMonitor(void* instance) {
+        return ((MetaDataServer*)instance)->monitorHeartBeat(nullptr);
+    }
+    int simulateRecover(int rank){
+        if(this->storage_servers[rank - 1]->isDown){
+            int qtype = RECOVER;
+            MPI_Send(&qtype, 1, MPI_INT, rank, rank, MPI_COMM_WORLD);
+        }
+        return 0;
+    }
+    int simulateFailover(int rank){
+        if(!this->storage_servers[rank - 1]->isDown){
+            int qtype = FAILOVER;
+            MPI_Send(&qtype, 1, MPI_INT, rank, rank, MPI_COMM_WORLD);
+        }
+        return 0;
+    }
 };
+
+void* sendHeartBeat(void* params) {
+    StorageServer* status = (StorageServer*)params;
+    while (!status->shouldExit()) {
+        if (status->isActive()) {
+            // cout << "heartbeat sent by " << status->server_id + 1 << endl;
+            MPI_Send(&status->server_id, 1, MPI_INT, MD_SERVER_RANK, 72, MPI_COMM_WORLD);
+        }
+        for (int i = 0; i < 100 ; ++i) {
+            if (status->shouldExit()) {
+                cout << "sender" << endl;
+                return nullptr;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    cout << "sender" << endl;
+    return nullptr;
+}
+
+// void* sendHeartBeat(void* params) {
+//     StorageServer* status = (StorageServer*)params;
+
+//     while (!status->shouldExit()) {
+//         MPI_Request request;
+//         if (status->isActive()) {
+//             // Initiate a non-blocking send operation
+//             MPI_Isend(&status->server_id, 1, MPI_INT, MD_SERVER_RANK, 72, MPI_COMM_WORLD, &request);
+//             bool request_completed = false;
+//             while (!status->shouldExit()) {
+//                 int flag = 0;
+//                 // Check if the request has completed 
+//                 MPI_Test(&request, &flag, MPI_STATUS_IGNORE);
+
+//                 if (flag) {
+//                     request_completed = true;
+//                     break; // The send operation completed successfully
+//                 }
+//                 // Sleep for a short duration before checking again
+//                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+//                 cout << "hi" << status->shouldExit();
+//             }
+//             // If the thread needs to exit but the request is still pending, cancel it
+//             if (!request_completed) {
+//                 MPI_Cancel(&request);
+//                 MPI_Request_free(&request); // Free resources associated with the request
+//             }
+//             // cout << "he" << status->shouldExit() << endl;
+//         }
+//         // Sleep for 1 second before sending the next heartbeat
+//         // std::this_thread::sleep_for(std::chrono::seconds(1));
+//         for (int i = 0; i < 100 ; ++i) {
+//             if (status->shouldExit()) {
+//                 cout << "sender" << endl;
+//                 return nullptr;
+//             }
+//             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+//         }
+//     }
+
+//     cout << "sender" << status->server_id << endl;
+//     return nullptr;
+// }
+
 
 int sendQueryType(int QueryType, int DstRank){
     if(MPI_Send(&QueryType, 1, MPI_INT, DstRank, DstRank, MPI_COMM_WORLD) != MPI_SUCCESS){
@@ -216,52 +436,49 @@ void divideFileIntoChunks(string &data, vector<vector<char>> &chunks_list){
     }
 }
 
-void readInput(vector<string> &commands){
+void readInput(vector<string> &args){
     string line, arg;
     getline(cin, line);
     stringstream strstream(line);
     while(strstream >> arg){
-        commands.push_back(arg);
-    }
-}
-void sendExitToAll(int size){
-    for(int i = 1 ; i < size ; i++){
-        int qtype = 6;
-        sendQueryType(qtype, i);
+        args.push_back(arg);
     }
 }
 
+
 int main(int argc, char** argv){
-    MPI_Init(&argc, &argv);
+    int provided;
+    // MPI_Init(&argc, &argv);
+    if(MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided) != MPI_SUCCESS){
+        cout << "Error during MPI intialization" << endl;
+        return 1;
+    }
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     if(rank == MD_SERVER_RANK){
+        cout << provided << endl;
         MetaDataServer* md_server = new MetaDataServer(size - 1);
+        pthread_t heartBeatReceiver, heartBeatMonitor;
+        pthread_create(&heartBeatReceiver, nullptr, md_server->startReceiver, md_server);
+        pthread_create(&heartBeatMonitor, nullptr, md_server->startMonitor, md_server);
+
         // Note : can't run with size = 1, handle this case accordingly
         // - To Do ; Error handling for wrong input format
-        while(true){
-            // int rank; cin >> rank;
-            // // int query; cin >> query;
-            // // int ret = sendQueryType(query, rank);
-            // // cout << ret << endl;
-            // // vector<char> chunk(32,'a');
-            // // sendChunk(chunk, rank);
-            // string path;
-            // cin >> path;
-            vector<string> commands;
-            readInput(commands);
-            if(commands[0] == "upload"){
-                File* file = new File(commands[1], commands[2]);
+
+        while(!md_server->shouldExit()){
+            vector<string> args;
+            readInput(args);
+            if(args[0] == "upload"){
+                File* file = new File(args[1], args[2]);
                 vector<vector<char>> chunks_list;
                 file->readFile(chunks_list);
-                // printChunkList(chunks_list);
                 md_server->allocateStorageServers(file);
                 md_server->sendFile(file, chunks_list);
             }
-            else if(commands[0] == "retrieve"){
+            else if(args[0] == "retrieve"){
                 File* file;
-                if((file = md_server->searchFile(commands[1])) == NULL){
+                if((file = md_server->searchFile(args[1])) == NULL){
                     cout << -1 << endl;
                 }
                 else{
@@ -270,17 +487,42 @@ int main(int argc, char** argv){
                     cout << content << endl;
                 }
             }
-            else if(commands[0] == "exit"){
-                sendExitToAll(size);
-                break;
+            else if(args[0] == "failover"){
+                int rank = stoi(args[1]);
+                if(rank > 0 && rank < size){
+                    md_server->simulateFailover(rank);
+                }
+                else{
+                    cout << -1 << endl;
+                }
+            }
+            else if(args[0] == "recover"){
+                int rank = stoi(args[1]);
+                if(rank > 0 && rank < size){
+                    md_server->simulateRecover(rank);
+                }
+                else{
+                    cout << -1 << endl;
+                }
+            }
+            else if(args[0] == "exit"){
+                md_server->closeStorageServers();
+                md_server->setExit();
             }
         }
+        pthread_join(heartBeatMonitor, nullptr);
+        pthread_join(heartBeatReceiver, nullptr);
+        cout << rank << " here" << endl;
     }
     else{
+        pthread_t heartBeatSender;
+        StorageServer* storageServer = new StorageServer(rank - 1);
+        pthread_create(&heartBeatSender, nullptr, sendHeartBeat, (void*)storageServer);
         vector<vector<char>> stored_data;
         // To Do - Error handling on this side(storage server)
+        
         int chunk_cnt = 0;
-        while(true){
+        while(!storageServer->shouldExit()){
             int qtype = -1;
             bool exitflag = false;
             int ret = receiveQueryType(qtype, rank, MD_SERVER_RANK);
@@ -301,22 +543,32 @@ int main(int argc, char** argv){
                     break;
                 }
                 case EXIT:{
-                    exitflag = true;
+                    cout << "Exit "  << rank << endl;
+                    storageServer->setExit();
+                    break;
+                }
+                case FAILOVER:{
+                    storageServer->deactivateServer();
+                    break;
+                }
+                case RECOVER:{
+                    storageServer->activateServer();
                     break;
                 }
                 default:
                     break;
             }
-            if(exitflag)
-                break;
         }
+        pthread_join(heartBeatSender, nullptr);
+        // storageServer->confirmExit();
+        cout << rank << " here" << endl;
     }
 
     MPI_Finalize();
     return 0;
 }
 
- // print chunks
+// print chunks
 // for(int i = 0 ; i < chunks_list.size() ; i++){
 //     cout << "CHUNK-" << i << endl;
 //     printChunk(chunks_list[i]);
@@ -334,3 +586,7 @@ TO DO-
     - stores list of file Struct 
     - file Struct contains mapping of chunk_no -> (parent_server, idx in that servers chunk list)
 */
+
+/*
+Fork can be used to execute the instructions
+ */
