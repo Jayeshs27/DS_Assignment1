@@ -171,6 +171,7 @@ public:
 class MetaDataServer{
     public:
         int num_storage_servers;
+        int last_used_server;
         vector<StorageServerInfo*> storage_servers;
         vector<File*> files_list;
         mutex heartBeatMutex;
@@ -179,6 +180,7 @@ class MetaDataServer{
     MetaDataServer(int num_servers){
         this->exit_flag.store(false);
         this->num_storage_servers = num_servers;
+        this->last_used_server = num_servers - 1;
         this->storage_servers.resize(num_servers);
         for(int i = 0 ; i < num_servers ; i++){
             this->storage_servers[i] = new StorageServerInfo(i);
@@ -203,7 +205,7 @@ class MetaDataServer{
     void allocateStorageServers(File *file){
         // Need to modify for failover of storage servers
         file->allocateChunkInfo();
-        int server_id = 0;
+        int server_id = (this->last_used_server + 1) % this->num_storage_servers;
         for(int i = 0 ; i < file->chunks_cnt ; i++){
             file->storage_location[i].resize(NUM_REPLICATION);
             for(int j = 0 ; j < NUM_REPLICATION ; j++){
@@ -327,7 +329,7 @@ class MetaDataServer{
                     lock_guard<mutex> lock(this->heartBeatMutex);
                     this->storage_servers[server_id]->last_heartbeat = chrono::steady_clock::now();
                     if (this->storage_servers[server_id]->isDown) {
-                        cout << "ss-" << server_id + 1 << " is up" << endl;
+                        // cout << "ss-" << server_id + 1 << " is up" << endl;
                         this->storage_servers[server_id]->isDown = false;
                     }
                     break; 
@@ -356,7 +358,7 @@ class MetaDataServer{
             for (int i = 0 ; i < this->num_storage_servers ; i++) {
                 int time_passed = chrono::duration_cast<chrono::seconds>(chrono::steady_clock::now() - this->storage_servers[i]->last_heartbeat).count();
                 if (!this->storage_servers[i]->isDown && time_passed > FAILOVER_INTERVAL) {
-                    cout << "rank " << i + 1 << " is down." << endl;
+                    // cout << "rank " << i + 1 << " is down." << endl;
                     this->storage_servers[i]->isDown = true;
                 }
             }
@@ -503,6 +505,7 @@ int main(int argc, char** argv){
                         break;
                     }
                     printSuccess();
+                    md_server->listFileLocations(file);
                     break;
                 }
                 case RETRIEVE:{
