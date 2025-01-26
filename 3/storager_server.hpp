@@ -36,31 +36,52 @@ public:
     }
     void searchExactWord(int chunk_idx, string& target, vector<int> &positions, vector<int> &partialMatches) {
         string line(this->stored_data[chunk_idx].begin(), this->stored_data[chunk_idx].end());
-        size_t pos = 0;
-        size_t wordStart = 0;
+        int pos = 0;
+        int wordStart = 0;
 
-        istringstream iss(line);
-        string word;
         string firstWord(""), lastWord("");
-        while (iss >> word) {
-            if(firstWord.empty()){
-                firstWord = word;
+
+        for (int i = 0; i < line.size(); ) {
+            // Skip any separators (spaces, commas, periods, etc.)
+            while (i < line.size() && !isalnum(line[i])) {
+                ++i;
             }
-            if (word == target) {
-                positions.push_back(wordStart); 
+
+            // Mark the start of the word
+            int start = i;
+            // Find the end of the current word
+            while (i < line.size() && isalnum(line[i])) {
+                ++i;
             }
-            wordStart = line.find(word, wordStart) + word.length() + 1; // Include the space
-            lastWord = word;
+
+            // Extract the word
+            if (start < i) {
+                string word = line.substr(start, i - start);
+
+                // Save the first word encountered
+                if (firstWord.empty()) {
+                    firstWord = word;
+                }
+
+                // Check if the word matches the target
+                if (word == target) {
+                    positions.push_back(start);
+                }
+
+                // Update the last word
+                lastWord = word;
+            }
         }
+        
         // cout << firstWord << " " << lastWord << endl;
         partialMatches.resize(2, -1);
-        if(target.size() > firstWord.size() && line[0] != ' '){
+        if(target.size() > firstWord.size() && isalnum(line[0])){
             // cout << string(target.end() - firstWord.size(), target.end()) << endl;
             if(equal(target.end() - firstWord.size(), target.end(), line.begin())){
                 partialMatches[0] = firstWord.size();
             }
         }
-        if(target.size() > lastWord.size() && line[CHUNK_SIZE - 1] != ' '){
+        if(target.size() > lastWord.size() && isalnum(line[CHUNK_SIZE - 1])){
             // cout << string(target.begin(), target.begin() + lastWord.size()) << endl;
             if(equal(target.begin() , target.begin() + lastWord.size(), line.end() - lastWord.size())){
                 partialMatches[1] = lastWord.size();

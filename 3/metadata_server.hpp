@@ -267,8 +267,10 @@ class MetaDataServer{
                 offsets.push_back(i * CHUNK_SIZE - prevs[1]);
             }
             for(auto p : positions){
+                // cout << p << " ";
                 offsets.push_back(i * CHUNK_SIZE + p);
             }
+            // cout << endl;
             prevs = partialMatches;
         }
 
@@ -277,6 +279,19 @@ class MetaDataServer{
             cout << p << " ";
         }
         cout << endl;
+
+        // ofstream output("out.txt");
+        // if (!output.is_open()) {
+        //     cerr << "Error: Unable to open file for writing." << endl;
+        //     return -1;
+        // }
+        // output << offsets.size() << endl;
+        // for(auto p : offsets){
+        //     output << p << " ";
+        // }
+        // output << endl;
+        // output.close();
+
         return 0;
     }
     int sendSearchQuery(string target, int DstRank){
