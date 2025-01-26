@@ -647,14 +647,15 @@ int main(int argc, char** argv){
         pthread_create(&heartBeatReceiver, nullptr, md_server->startReceiver, md_server);
         pthread_create(&heartBeatMonitor, nullptr, md_server->startMonitor, md_server);
 
-        // Note : can't run with size = 1, handle this case accordingly
-        // - To Do ; Error handling for wrong input format
-
         while(!md_server->shouldExit()){
             vector<string> args;
             readInput(args);
             switch(getQueryType(args[0])){
                 case UPLOAD:{
+                    if(args.size() != 3){
+                        printFailure();
+                        break;
+                    }
                     File* file = new File(args[1], args[2]);
                     vector<vector<char>> chunks_list;
                     if(file->readFile(chunks_list) == -1){
@@ -671,6 +672,10 @@ int main(int argc, char** argv){
                     break;
                 }
                 case RETRIEVE:{
+                    if(args.size() != 2){
+                        printFailure();
+                        break;
+                    }
                     File* file;
                     if((file = md_server->searchFile(args[1])) == NULL){
                         printFailure();
@@ -698,6 +703,10 @@ int main(int argc, char** argv){
                     break;
                 }
                 case SEARCH:{
+                    if(args.size() != 3){
+                        printFailure();
+                        break;
+                    }
                     File* file;
                     if((file = md_server->searchFile(args[1])) == NULL){
                         printFailure();
@@ -713,6 +722,10 @@ int main(int argc, char** argv){
                     break;
                 }
                 case LIST_FILE:{
+                    if(args.size() != 2){
+                        printFailure();
+                        break;
+                    }
                     File* file;
                     if((file = md_server->searchFile(args[1])) == NULL){
                         printFailure();
@@ -726,6 +739,10 @@ int main(int argc, char** argv){
                     break;
                 }
                 case FAILOVER:{
+                    if(args.size() != 2){
+                        printFailure();
+                        break;
+                    }
                     int ss_rank = stoi(args[1]);
                     if(ss_rank > 0 && ss_rank < size){
                         if(md_server->simulateFailover(ss_rank) == -1){
@@ -740,6 +757,10 @@ int main(int argc, char** argv){
                     break;
                 }
                 case RECOVER:{
+                    if(args.size() != 2){
+                        printFailure();
+                        break;
+                    }
                     int rank = stoi(args[1]);
                     if(rank > 0 && rank < size){
                         if(md_server->simulateRecover(rank) == -1){
@@ -771,7 +792,6 @@ int main(int argc, char** argv){
         pthread_t heartBeatSender;
         StorageServer* storageServer = new StorageServer(rank - 1);
         pthread_create(&heartBeatSender, nullptr, sendHeartBeat, (void*)storageServer);
-        // To Do - Error handling on this side(storage server)
 
         while(!storageServer->shouldExit()){
             int qtype = -1;
@@ -817,27 +837,3 @@ int main(int argc, char** argv){
     MPI_Finalize();
     return 0;
 }
-
-// print chunks
-// for(int i = 0 ; i < chunks_list.size() ; i++){
-//     cout << "CHUNK-" << i << endl;
-//     printChunk(chunks_list[i]);
-//     cout << endl;
-// }
-
-/*
-TO DO-
-1. write allocate chunks to servers algorithm
-2. write code to receive data from storage servers
-
--- MetaData server
-    - stores list of struct 'Storage server'
-    - struct storage server stores if that server is down or not, count of chunks it stores etc.
-    - stores list of file Struct 
-    - file Struct contains mapping of chunk_no -> (parent_server, idx in that servers chunk list)
-*/
-
-/*
-Fork can be used to execute the instructions
-mpiexec -np 12 --use-hwthread-cpus --oversubscribe ./a.out
- */
