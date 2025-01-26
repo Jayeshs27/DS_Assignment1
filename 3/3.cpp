@@ -127,18 +127,37 @@ public:
     void activateServer(){
         this->active_flag.store(true);
     }
-    void searchExactWord(int chunk_idx, string& target, vector<int> &positions) {
+    void searchExactWord(int chunk_idx, string& target, vector<int> &positions, vector<int> &partialMatches) {
         string line(this->stored_data[chunk_idx].begin(), this->stored_data[chunk_idx].end());
         size_t pos = 0;
         size_t wordStart = 0;
 
         istringstream iss(line);
         string word;
+        string firstWord(""), lastWord("");
         while (iss >> word) {
+            if(firstWord.empty()){
+                firstWord = word;
+            }
             if (word == target) {
                 positions.push_back(wordStart); 
             }
             wordStart = line.find(word, wordStart) + word.length() + 1; // Include the space
+            lastWord = word;
+        }
+        // cout << firstWord << " " << lastWord << endl;
+        partialMatches.resize(2, -1);
+        if(target.size() > firstWord.size() && line[0] != ' '){
+            // cout << string(target.end() - firstWord.size(), target.end()) << endl;
+            if(equal(target.end() - firstWord.size(), target.end(), line.begin())){
+                partialMatches[0] = firstWord.size();
+            }
+        }
+        if(target.size() > lastWord.size() && line[CHUNK_SIZE - 1] != ' '){
+            // cout << string(target.begin(), target.begin() + lastWord.size()) << endl;
+            if(equal(target.begin() , target.begin() + lastWord.size(), line.end() - lastWord.size())){
+                partialMatches[1] = lastWord.size();
+            }
         }
     }
     int handleSearchRequest(){
@@ -157,8 +176,8 @@ public:
         }
 
         string target(query.begin(), query.end());
-        vector<int> offsets;
-        this->searchExactWord(chunk_id, target, offsets);
+        vector<int> offsets, partialMatches;
+        this->searchExactWord(chunk_id, target, offsets, partialMatches);
 
         int vsize = offsets.size();
         if(MPI_Send(&vsize, 1, MPI_INT, MD_SERVER_RANK, MD_SERVER_RANK, MPI_COMM_WORLD) != MPI_SUCCESS){
@@ -167,34 +186,7 @@ public:
         if(MPI_Send(offsets.data(), vsize, MPI_INT, MD_SERVER_RANK, MD_SERVER_RANK, MPI_COMM_WORLD) != MPI_SUCCESS){
             return -1;
         }
-
-        vector<int> front, back;
-        this->findHalfMatches(chunk_id, target, front, back);
-
-        // cout << "front: ";
-        // for(auto f : front){
-        //     cout << f << " ";
-        // }
-        // cout << endl;
-        // cout << "back: ";
-        // for(auto b : back){
-        //     cout << b << " ";
-        // }
-        // cout << endl;
-
-        vsize = front.size();
-        if(MPI_Send(&vsize, 1, MPI_INT, MD_SERVER_RANK, MD_SERVER_RANK, MPI_COMM_WORLD) != MPI_SUCCESS){
-            return -1;
-        }
-        if(MPI_Send(front.data(), vsize, MPI_INT, MD_SERVER_RANK, MD_SERVER_RANK, MPI_COMM_WORLD) != MPI_SUCCESS){
-            return -1;
-        }
-
-        vsize = back.size();
-        if(MPI_Send(&vsize, 1, MPI_INT, MD_SERVER_RANK, MD_SERVER_RANK, MPI_COMM_WORLD) != MPI_SUCCESS){
-            return -1;
-        }
-        if(MPI_Send(back.data(), vsize, MPI_INT, MD_SERVER_RANK, MD_SERVER_RANK, MPI_COMM_WORLD) != MPI_SUCCESS){
+        if(MPI_Send(partialMatches.data(), 2, MPI_INT, MD_SERVER_RANK, MD_SERVER_RANK, MPI_COMM_WORLD) != MPI_SUCCESS){
             return -1;
         }
         return 0;
@@ -407,25 +399,17 @@ class MetaDataServer{
             if(receiveChunk(chunk, MD_SERVER_RANK, server_id + 1) == -1){
                 return -1;
             }
-            printChunk(chunk);
-            cout << endl;
-            // cout << "recv chunk-" << i << " from rank-" << server_id + 1 << endl;
-            if(i == file->chunks_cnt - 1){
-                for(auto c : chunk){
-                    if(c == '\0'){
-                        break;
-                    }
-                    content.push_back(c);
-                }
-            }
-            else{
+
+            if (i == file->chunks_cnt - 1) {
+                content.append(chunk.begin(), find(chunk.begin(), chunk.end(), '\0'));
+            } else {
                 content.append(chunk.begin(), chunk.end());
             }
         }
         return 0;
     }
     int searchIntoFile(File* file, string target){
-        vector<int> offsets;
+        vector<int> offsets, prevs(2, -1);
         int qtype = SEARCH, server_id, chunk_id, ret;
         for(int i = 0 ; i < file->chunks_cnt ; i++){
             tie(server_id, chunk_id) = this->getAvailableLocation(file, i);
@@ -436,13 +420,17 @@ class MetaDataServer{
             if(sendChunkId(chunk_id, server_id + 1) == -1){
                 return -1;
             }
-            vector<int> positions;
-            if(handleSearchRequest(target, server_id + 1, positions) == -1){
+            vector<int> positions, partialMatches;
+            if(handleSearchRequest(target, server_id + 1, positions, partialMatches) == -1){
                 return -1;
             }
-            for(auto p : positions){
-                offsets.push_back(p + i * CHUNK_SIZE);
+            if(prevs[1] + partialMatches[0] == target.size()){
+                offsets.push_back(i * CHUNK_SIZE - prevs[1]);
             }
+            for(auto p : positions){
+                offsets.push_back(i * CHUNK_SIZE + p);
+            }
+            prevs = partialMatches;
         }
         cout << offsets.size() << endl;
         for(auto p : offsets){
@@ -451,7 +439,7 @@ class MetaDataServer{
         cout << endl;
         return 0;
     }
-    int handleSearchRequest(string target, int DstRank, vector<int> &positions){
+    int handleSearchRequest(string target, int DstRank, vector<int> &positions, vector<int> &partialMatches){
         int target_size = target.size();
         if(MPI_Send(&target_size, 1, MPI_INT, DstRank, DstRank, MPI_COMM_WORLD) != MPI_SUCCESS){
             return -1;
@@ -470,20 +458,8 @@ class MetaDataServer{
             return -1;
         }
 
-        vector<int> partial_front, partial_back;
-        if(MPI_Recv(&data_size, 1, MPI_INT, DstRank, MD_SERVER_RANK, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
-            return -1;
-        }
-        partial_front.resize(data_size);
-        if(MPI_Recv(partial_front.data(), data_size, MPI_INT, DstRank, MD_SERVER_RANK, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
-            return -1;
-        }
-
-        if(MPI_Recv(&data_size, 1, MPI_INT, DstRank, MD_SERVER_RANK, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
-            return -1;
-        }
-        partial_back.resize(data_size);
-        if(MPI_Recv(partial_back.data(), data_size, MPI_INT, DstRank, MD_SERVER_RANK, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
+        partialMatches.resize(2);
+        if(MPI_Recv(partialMatches.data(), 2, MPI_INT, DstRank, MD_SERVER_RANK, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
             return -1;
         }
         return 0;
