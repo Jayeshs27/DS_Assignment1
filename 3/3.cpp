@@ -10,7 +10,7 @@ using namespace std;
 
 #define CHUNK_SIZE 32
 #define MD_SERVER_RANK 0
-#define FAILOVER_INTERVAL 3
+#define FAILOVER_INTERVAL 2.2
 #define HEART_BEAT_MESSAGE_TAG 72
 #define NUM_REPLICATION 3
 
@@ -485,7 +485,7 @@ class MetaDataServer{
             while (!this->shouldExit()) {
                 MPI_Test(&request, &flag, MPI_STATUS_IGNORE);
                 if (flag) {
-                    lock_guard<mutex> lock(this->heartBeatMutex);
+                    // lock_guard<mutex> lock(this->heartBeatMutex);
                     this->storage_servers[server_id]->last_heartbeat = chrono::steady_clock::now();
                     if (this->storage_servers[server_id]->isDown) {
                         // cout << "ss-" << server_id + 1 << " is up" << endl;
@@ -493,7 +493,7 @@ class MetaDataServer{
                     }
                     break; 
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
             if (this->shouldExit()) {
@@ -507,16 +507,19 @@ class MetaDataServer{
 
     void* monitorHeartBeat(void*) {
         while (!this->shouldExit()) {
-            for (int i = 0; i < 50 ; ++i) {
-                if (this->shouldExit()) {
-                    return nullptr;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            lock_guard<mutex> lock(this->heartBeatMutex);
+            // int iter = 50 / this->num_storage_servers;
+            // for (int i = 0; i < 5 ; ++i) {
+            //     if (this->shouldExit()) {
+            //         return nullptr;
+            //     }
+            //     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            // }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+            // lock_guard<mutex> lock(this->heartBeatMutex);
             for (int i = 0 ; i < this->num_storage_servers ; i++) {
-                int time_passed = chrono::duration_cast<chrono::seconds>(chrono::steady_clock::now() - this->storage_servers[i]->last_heartbeat).count();
-                if (!this->storage_servers[i]->isDown && time_passed > FAILOVER_INTERVAL) {
+                int time_passed = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - this->storage_servers[i]->last_heartbeat).count();
+                if (!this->storage_servers[i]->isDown && time_passed > FAILOVER_INTERVAL * 1000) {
                     // cout << "rank " << i + 1 << " is down." << endl;
                     this->storage_servers[i]->isDown = true;
                 }
