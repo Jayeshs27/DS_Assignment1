@@ -409,7 +409,7 @@ class MetaDataServer{
         return 0;
     }
     int searchIntoFile(File* file, string target){
-        vector<int> offsets, prevs(2, -1);
+        vector<int> serversSeqs;
         int qtype = SEARCH, server_id, chunk_id, ret;
         for(int i = 0 ; i < file->chunks_cnt ; i++){
             tie(server_id, chunk_id) = this->getAvailableLocation(file, i);
@@ -420,8 +420,16 @@ class MetaDataServer{
             if(sendChunkId(chunk_id, server_id + 1) == -1){
                 return -1;
             }
+            if(sendSearchQuery(target, server_id + 1) == -1){
+                return -1;
+            }
+            serversSeqs.push_back(server_id + 1);
+        }
+
+        vector<int> offsets, prevs(2, -1);
+        for(int i = 0 ; i < file->chunks_cnt ; i++){
             vector<int> positions, partialMatches;
-            if(handleSearchRequest(target, server_id + 1, positions, partialMatches) == -1){
+            if(this->receiveSearchResponse(serversSeqs[i], positions, partialMatches) == -1){
                 return -1;
             }
             if(prevs[1] + partialMatches[0] == target.size()){
@@ -432,6 +440,7 @@ class MetaDataServer{
             }
             prevs = partialMatches;
         }
+
         cout << offsets.size() << endl;
         for(auto p : offsets){
             cout << p << " ";
@@ -439,7 +448,7 @@ class MetaDataServer{
         cout << endl;
         return 0;
     }
-    int handleSearchRequest(string target, int DstRank, vector<int> &positions, vector<int> &partialMatches){
+    int sendSearchQuery(string target, int DstRank){
         int target_size = target.size();
         if(MPI_Send(&target_size, 1, MPI_INT, DstRank, DstRank, MPI_COMM_WORLD) != MPI_SUCCESS){
             return -1;
@@ -447,7 +456,9 @@ class MetaDataServer{
         if(MPI_Send(target.c_str(), target_size, MPI_CHAR, DstRank, DstRank, MPI_COMM_WORLD) != MPI_SUCCESS){
             return -1;
         }
-
+        return 0;
+    }
+    int receiveSearchResponse(int DstRank, vector<int> &positions, vector<int> &partialMatches){
         int data_size;
         MPI_Status status; 
         if(MPI_Recv(&data_size, 1, MPI_INT, DstRank, MD_SERVER_RANK, MPI_COMM_WORLD, &status) != MPI_SUCCESS){
